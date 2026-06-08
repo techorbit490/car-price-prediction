@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>CarValueAI — AI Car Price Predictor</title>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"/>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js">
+/* ══════════════════════════════════════
+   PIN LOCK FOR HISTORY
+══════════════════════════════════════ */
+let pinBuffer='', pinUnlocked=false;
+const DEFAULT_PIN='2580';
+
+function getPIN(){return localStorage.getItem('cva_pin')||DEFAULT_PIN;}
+
+function checkPinBeforeHistory(){
+  if(pinUnlocked){renderHistory();return;}
+  document.getElementById('pinOverlay').style.display='flex';
+  pinBuffer=''; updatePinDots();
+}
+
+function pinPress(digit){
+  if(!digit)return;
+  if(pinBuffer.length>=4)return;
+  pinBuffer+=digit;
+  updatePinDots();
+  if(pinBuffer.length===4) setTimeout(checkPin,200);
+}
+
+function pinDel(){
+  pinBuffer=pinBuffer.slice(0,-1);
+  updatePinDots();
+  document.getElementById('pinError').textContent='';
+}
+
+function updatePinDots(){
+  for(let i=0;i<4;i++){
+    const d=document.getElementById('pd'+i);
+    if(d){d.className='pin-dot'+(i<pinBuffer.length?' filled':'');}
+  }
+}
+
+function checkPin(){
+  if(pinBuffer===getPIN()){
+    pinUnlocked=true;
+    document.getElementById('pinOverlay').style.display='none';
+    renderHistory();
+  } else {
+    for(let i=0;i<4;i++){const d=document.getElementById('pd'+i);if(d)d.className='pin-dot error';}
+    document.getElementById('pinError').textContent='Galat PIN! Phir try karein.';
+    setTimeout(()=>{pinBuffer='';updatePinDots();document.getElementById('pinError').textContent='';},900);
+  }
+}
+
+// Lock history when switching away
+const _origShowTab=showTab;
+
+
+/* ══════════════════════════════════════
+   PRICE BREAKDOWN ANALYSIS
+══════════════════════════════════════ */
+
+function buildPriceBreakdown(payload, predictedPrice){
+  const base = window.BASE_P[payload.brand]||600000;
+  const age = 2024-(+payload.year);
+  const dep = Math.max(.2,1-age*.07);
+  const kmf = Math.max(.3,1-(+payload.km_driven)/500000);
+  const ff = {Petrol:1,Diesel:1.1,CNG:.9,Electric:1.3,Hybrid:1.2}[payload.fuel_type]||1;
+  const tf = {Manual:1,Automatic:1.15,CVT:1.12,DCT:1.18}[payload.transmission]||1;
+  const of = {'First Owner':1,'Second Owner':.85,'Third Owner':.7,'Fourth & Above Owner':.55}[payload.owner]||1;
+  
+  const factors=[
+    {label:'Base Brand Value', value:base, pct:100, color:'#3b82f6'},
+    {label:`Age Depreciation (${age} yrs)`, value:Math.round(base*dep), pct:Math.round(dep*100), color:'#f59e0b'},
+    {label:`KM Factor (${(+payload.km_driven).toLocaleString('en-IN')} km)`, value:Math.round(base*dep*kmf), pct:Math.round(kmf*100), color:'#10b981'},
+    {label:`Fuel: ${payload.fuel_type}`, value:Math.round(base*dep*kmf*ff), pct:Math.round(ff*100), color:'#8b5cf6'},
+    {label:`${payload.transmission} Transmission`, value:Math.round(base*dep*kmf*ff*tf), pct:Math.round(tf*100), color:'#06b6d4'},
+    {label:`${payload.owner}`, value:predictedPrice, pct:Math.round(of*100), color:of>=1?'#10b981':of>=.8?'#f59e0b':'#ef4444'},
+  ];
+  
+  const el=document.getElementById('pb2Items');
+  if(!el)return;
+  el.innerHTML=factors.map(f=>`
+    <div class="pb2-item">
+      <div style="flex:1">
+        <div class="pb2-label">${f.label}</div>
+        <div class="pb2-bar-wrap"><div class="pb2-bar" style="width:${Math.min(f.pct,100)}%;background:${f.color}"></div></div>
+      </div>
+      <div class="pb2-val" style="margin-left:.8rem">${fmtINR(f.value)}</div>
+    </div>`).join('');
+}
+
+/* ══════════════════════════════════════
+   REPORT DOWNLOAD
+══════════════════════════════════════ */
+function downloadReport(format){
+  if(!lastPred){showToast('Pehle prediction karein!','error');return;}
+  const p=lastPred;
+  if(format==='csv'){
+    const cols=Object.keys(p);
+    const csv=cols.join(',')+'\n'+cols.map(c=>`"${p[c]||''}"`).join(',');
+    triggerDL(csv,'text/csv','car_report_'+Date.now()+'.csv');
+    showToast('📊 CSV downloaded!','success');
+  } else if(format==='json'){
+    triggerDL(JSON.stringify(p,null,2),'application/json','car_report_'+Date.now()+'.json');
+    showToast('🗄️ JSON downloaded!','success');
+  } else if(format==='pdf'){
+    const w=window.open('','_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>CarValueAI Report</title>
+    <style>body{font-family:Arial,sans-serif;background:#05080f;color:#f0f4ff;padding:2rem;margin:0;}
+    h1{color:#f59e0b;font-size:2rem;margin-bottom:.5rem;}
+    .sub{color:#8b9ab5;margin-bottom:2rem;}
+    table{width:100%;border-collapse:collapse;}
+    th{text-align:left;padding:.6rem 1rem;background:#0f1623;color:#8b9ab5;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;}
+    td{padding:.7rem 1rem;border-bottom:1px solid rgba(255,255,255,.06);color:#f0f4ff;}
+    .price{font-size:2.5rem;color:#f59e0b;font-weight:bold;margin:1.5rem 0;}
+    .footer{margin-top:2rem;color:#3d4f6b;font-size:.8rem;}
+    @media print{body{background:#fff;color:#000;}h1,td{color:#000;}.price{color:#d97706;}}</style>
+    </head><body>
+    <h1>🚗 CarValueAI Report</h1>
+    <div class="sub">Generated: ${new Date().toLocaleString('en-IN')}</div>
+    <div class="price">${fmtINR(p.predicted_price)}</div>
+    <table>
+    <tr><th>Parameter</th><th>Value</th></tr>
+    ${[['Brand',p.brand],['Model',p.model_name],['Year',p.year],['Fuel Type',p.fuel_type],['Transmission',p.transmission],['Owner',p.owner],['KM Driven',(+(p.km_driven||0)).toLocaleString('en-IN')+' km'],['Engine',p.engine_cc+' cc'],['Max Power',p.max_power_hp+' HP'],['Mileage',(+(p.mileage_kmpl||0)).toFixed(1)+' km/l'],['Seats',p.seats],['Seller Type',p.seller_type],['Confidence Low',fmtINR(p.confidence_low)],['Predicted Price',fmtINR(p.predicted_price)],['Confidence High',fmtINR(p.confidence_high)],['Algorithm',p.model_used||'Local']].map(([l,v])=>`<tr><td>${l}</td><td>${v}</td></tr>`).join('')}
+    </table>
+    <div class="footer">CarValueAI — Sirf ek estimate hai, actual market price vary kar sakti hai.</div>
+    </body></html>`);
+    w.document.close();
+    setTimeout(()=>w.print(),400);
+    showToast('📋 PDF print dialog khul raha hai...','success');
+  }
+}
+
+function triggerDL(content,mime,filename){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:mime}));
+  a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+
+</script>
+<style>
+:root{
+  --bg:#05080f;--bg2:#0a0e1a;--bg3:#0f1623;--card:rgba(15,22,35,0.85);
+  --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.15);
+  --gold:#f59e0b;--gold2:#fbbf24;--gold3:#fde68a;
+  --blue:#3b82f6;--blue2:#60a5fa;--green:#10b981;--red:#f43f5e;
+  --text:#f0f4ff;--text2:#8b9ab5;--text3:#3d4f6b;
+  --fh:'Bebas Neue',sans-serif;--fb:'Plus Jakarta Sans',sans-serif;--fm:'JetBrains Mono',monospace;
+  --r:12px;--r2:20px;--shadow:0 8px 40px rgba(0,0,0,0.6);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html{scroll-behavior:smooth;}
+body{font-family:var(--fb);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;-webkit-font-smoothing:antialiased;}
+::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-track{background:var(--bg2);}::-webkit-scrollbar-thumb{background:#1a2840;border-radius:99px;}
+#bgCanvas{position:fixed;inset:0;z-index:0;pointer-events:none;opacity:0.45;}
+#cursorGlow{position:fixed;z-index:0;pointer-events:none;width:500px;height:500px;border-radius:50%;background:radial-gradient(circle,rgba(245,158,11,0.05) 0%,transparent 65%);}
+.page-wrap{position:relative;z-index:1;}
+
+/* NAVBAR */
+.navbar{position:fixed;top:0;left:0;right:0;z-index:999;height:66px;display:flex;align-items:center;padding:0 2.5rem;gap:1.5rem;background:rgba(5,8,15,0.9);backdrop-filter:blur(24px);border-bottom:1px solid var(--border);transition:box-shadow .3s;}
+.navbar.scrolled{box-shadow:0 4px 30px rgba(0,0,0,0.5);}
+.nav-logo{display:flex;align-items:center;gap:.7rem;text-decoration:none;cursor:pointer;}
+.nav-logo-icon{width:36px;height:36px;border-radius:9px;background:linear-gradient(135deg,var(--gold),#d97706);display:flex;align-items:center;justify-content:center;font-size:1.1rem;transition:transform .3s;}
+.nav-logo:hover .nav-logo-icon{transform:rotate(-5deg) scale(1.05);}
+.nav-logo-text{font-family:var(--fb);font-size:1.1rem;font-weight:800;color:var(--text);}
+.nav-logo-text em{color:var(--gold);font-style:normal;}
+.nav-tabs{display:flex;gap:.2rem;margin-left:auto;}
+.ntab{display:flex;align-items:center;gap:.4rem;padding:.45rem .9rem;border-radius:8px;background:none;border:none;color:var(--text3);font-family:var(--fb);font-size:.875rem;font-weight:500;cursor:pointer;transition:all .2s;white-space:nowrap;}
+.ntab .nn{font-family:var(--fm);font-size:.62rem;color:var(--text3);transition:color .2s;}
+.ntab:hover{color:var(--text2);background:rgba(255,255,255,0.04);}
+.ntab.active{color:var(--gold);background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.2);}
+.ntab.active .nn{color:var(--gold);}
+.nav-status{display:flex;align-items:center;gap:.5rem;padding:.35rem .9rem;border-radius:99px;background:rgba(255,255,255,0.04);border:1px solid var(--border);font-size:.75rem;color:var(--text3);flex-shrink:0;}
+.ns-dot{width:7px;height:7px;border-radius:50%;background:var(--text3);transition:all .4s;}
+.ns-dot.online{background:var(--green);box-shadow:0 0 8px var(--green);animation:pdot 2s infinite;}
+.ns-dot.offline{background:var(--red);box-shadow:0 0 8px var(--red);}
+@keyframes pdot{0%,100%{opacity:1}50%{opacity:.5}}
+
+/* TABS */
+.tab-section{display:none;min-height:100vh;padding:90px 2.5rem 4rem;}
+.tab-section.active{display:block;}
+.container{max-width:1280px;margin:0 auto;}
+
+/* EYEBROW */
+.eyebrow{display:inline-flex;align-items:center;gap:.5rem;font-family:var(--fm);font-size:.7rem;letter-spacing:.15em;color:var(--gold);text-transform:uppercase;padding:.35rem 1rem;border-radius:99px;background:rgba(245,158,11,0.08);border:1px solid rgba(245,158,11,0.2);margin-bottom:1.2rem;}
+.eyebrow::before{content:'';width:5px;height:5px;border-radius:50%;background:var(--gold);flex-shrink:0;animation:pdot 1.8s infinite;}
+.sec-title{font-family:var(--fh);font-size:clamp(2.5rem,5vw,4rem);line-height:.95;letter-spacing:.02em;margin-bottom:1rem;}
+.sec-title .gold{color:var(--gold);}
+.sec-desc{color:var(--text2);font-size:1.05rem;line-height:1.7;margin-bottom:2rem;}
+
+/* GLASS */
+.glass{background:var(--card);backdrop-filter:blur(20px) saturate(1.5);border:1px solid var(--border);border-radius:var(--r2);box-shadow:var(--shadow);}
+.glass:hover{border-color:var(--border2);}
+
+/* BUTTONS */
+.btn-gold{display:inline-flex;align-items:center;gap:.6rem;padding:.85rem 2rem;border:none;border-radius:var(--r);background:linear-gradient(135deg,#d97706,var(--gold),var(--gold2));color:#000;font-family:var(--fb);font-size:.95rem;font-weight:700;cursor:pointer;transition:all .3s;text-decoration:none;box-shadow:0 0 25px rgba(245,158,11,0.3);position:relative;overflow:hidden;}
+.btn-gold::before{content:'';position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.25),transparent);transform:translateX(-100%);}
+.btn-gold:hover::before{transform:translateX(100%);transition:transform .5s;}
+.btn-gold:hover{transform:translateY(-2px);box-shadow:0 0 45px rgba(245,158,11,0.5);}
+.btn-outline{display:inline-flex;align-items:center;gap:.6rem;padding:.8rem 1.8rem;border-radius:var(--r);background:transparent;border:1px solid var(--border2);color:var(--text2);font-family:var(--fb);font-size:.9rem;font-weight:600;cursor:pointer;transition:all .2s;text-decoration:none;}
+.btn-outline:hover{border-color:var(--gold);color:var(--gold);background:rgba(245,158,11,0.05);}
+.btn-ghost{display:inline-flex;align-items:center;gap:.5rem;padding:.55rem 1.1rem;border-radius:9px;background:rgba(255,255,255,0.04);border:1px solid var(--border);color:var(--text2);font-family:var(--fb);font-size:.82rem;cursor:pointer;transition:all .2s;}
+.btn-ghost:hover{border-color:var(--gold);color:var(--gold);}
+.btn-danger{color:var(--red);border-color:rgba(244,63,94,0.25);background:rgba(244,63,94,0.05);}
+.btn-danger:hover{background:rgba(244,63,94,0.12);border-color:var(--red);}
+
+/* CHIPS */
+.chip{display:inline-flex;align-items:center;padding:.25rem .75rem;border-radius:99px;font-size:.72rem;font-weight:600;border:1px solid;}
+.chip-gold{background:rgba(245,158,11,0.1);color:var(--gold2);border-color:rgba(245,158,11,0.3);}
+.chip-blue{background:rgba(59,130,246,0.1);color:var(--blue2);border-color:rgba(59,130,246,0.3);}
+.chip-green{background:rgba(16,185,129,0.1);color:#34d399;border-color:rgba(16,185,129,0.3);}
+.chip-yellow{background:rgba(234,179,8,0.1);color:#facc15;border-color:rgba(234,179,8,0.3);}
+.chip-red{background:rgba(244,63,94,0.1);color:#fb7185;border-color:rgba(244,63,94,0.3);}
+
+/* TOAST */
+.toast{position:fixed;bottom:2rem;right:2rem;z-index:9999;padding:.9rem 1.5rem;border-radius:var(--r);background:var(--card);backdrop-filter:blur(20px);border:1px solid var(--border);color:var(--text);font-size:.875rem;box-shadow:0 10px 40px rgba(0,0,0,0.6);transform:translateY(80px) scale(.95);opacity:0;transition:all .4s cubic-bezier(.34,1.56,.64,1);pointer-events:none;max-width:340px;}
+.toast.show{transform:translateY(0) scale(1);opacity:1;}
+.toast.success{border-color:rgba(16,185,129,0.4);}
+.toast.error{border-color:rgba(244,63,94,0.4);}
+
+/* FOOTER */
+.footer{border-top:1px solid var(--border);padding:2rem 2.5rem;background:rgba(5,8,15,.6);}
+.footer-inner{max-width:1280px;margin:0 auto;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:1rem;}
+.footer-brand{font-family:var(--fb);font-size:1.1rem;font-weight:800;}
+.footer-brand em{color:var(--gold);font-style:normal;}
+.footer-stack{display:flex;gap:1rem;font-size:.78rem;color:var(--text3);}
+
+/* ════ HOME PAGE ════ */
+.hero{display:flex;align-items:center;gap:4rem;max-width:1280px;margin:0 auto;padding:3rem 0 4rem;}
+.hero-content{flex:1;max-width:640px;}
+.hero-title{font-family:var(--fh);font-size:clamp(3.5rem,6.5vw,6rem);line-height:.92;letter-spacing:.02em;margin-bottom:1.5rem;display:flex;flex-direction:column;}
+.hero-title-gold{background:linear-gradient(90deg,var(--gold),var(--gold2),var(--gold3));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;}
+.hero-desc{color:var(--text2);font-size:1.1rem;line-height:1.75;margin-bottom:2rem;max-width:520px;}
+.hero-ctas{display:flex;gap:1rem;flex-wrap:wrap;margin-bottom:3rem;}
+.hero-stats{display:flex;align-items:center;}
+.hs-item{display:flex;flex-direction:column;padding:0 1.5rem;}
+.hs-item:first-child{padding-left:0;}
+.hs-num{font-family:var(--fh);font-size:2.4rem;color:var(--gold);line-height:1;}
+.hs-lbl{font-size:.7rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text3);margin-top:.2rem;}
+.hs-div{width:1px;background:var(--border);height:40px;}
+.hero-visual{flex-shrink:0;position:relative;width:360px;height:380px;display:flex;align-items:center;justify-content:center;}
+.hv-ring{position:absolute;border-radius:50%;border:1px solid rgba(245,158,11,.15);}
+.r1{width:220px;height:220px;}.r2{width:300px;height:300px;opacity:.7;}.r3{width:380px;height:380px;opacity:.4;}
+.hv-card{width:300px;padding:1.5rem;animation:float 4s ease-in-out infinite;}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
+.hvc-hdr{display:flex;align-items:center;gap:.4rem;font-size:.72rem;color:var(--text3);margin-bottom:1rem;font-family:var(--fm);}
+.hvc-dot{width:9px;height:9px;border-radius:50%;}
+.hvc-dot.g{background:#22c55e;}.hvc-dot.y{background:var(--gold);}.hvc-dot.r{background:#ef4444;}
+.hvc-hdr span{margin-left:auto;}
+.hvc-emoji{font-size:2.5rem;margin-bottom:.6rem;}
+.hvc-lbl{font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text3);}
+.hvc-price{font-family:var(--fh);font-size:2rem;color:var(--gold);margin:.2rem 0 .8rem;}
+.hvc-track{flex:1;height:4px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden;}
+.hvc-fill{height:100%;width:72%;background:linear-gradient(90deg,var(--gold),var(--gold2));border-radius:99px;}
+.hvc-range{display:flex;align-items:center;gap:.6rem;margin-bottom:.8rem;}
+.hvc-range span{font-size:.7rem;color:var(--text3);font-family:var(--fm);}
+.hvc-tags{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:.6rem;}
+.hvc-model{font-size:.68rem;color:var(--text3);font-family:var(--fm);}
+.feat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1.25rem;margin-top:3rem;}
+.feat-card{padding:2rem;transition:all .3s;cursor:default;}
+.feat-card:hover{transform:translateY(-4px);box-shadow:0 16px 50px rgba(0,0,0,.6);border-color:var(--border2);}
+.fc-icon{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.4rem;margin-bottom:1.2rem;}
+.ico-g{background:rgba(245,158,11,.12);} .ico-b{background:rgba(59,130,246,.12);} .ico-e{background:rgba(16,185,129,.12);}
+.ico-y{background:rgba(234,179,8,.12);}  .ico-r{background:rgba(244,63,94,.12);}  .ico-p{background:rgba(139,92,246,.12);}
+.feat-card h3{font-size:1.1rem;font-weight:700;margin-bottom:.6rem;}
+.feat-card p{color:var(--text2);font-size:.9rem;line-height:1.65;margin-bottom:1.2rem;}
+.fc-link{color:var(--gold);font-size:.85rem;font-weight:600;text-decoration:none;display:inline-flex;align-items:center;gap:.3rem;cursor:pointer;}
+.fc-link:hover{gap:.6rem;}
+.steps{display:flex;align-items:flex-start;gap:1rem;margin:3rem 0 2.5rem;flex-wrap:wrap;}
+.step{flex:1;min-width:200px;background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:2rem;}
+.step:hover{border-color:rgba(245,158,11,.3);}
+.step-num{font-family:var(--fh);font-size:3rem;color:rgba(245,158,11,.2);line-height:1;margin-bottom:.8rem;}
+.step h3{font-size:1rem;font-weight:700;margin-bottom:.5rem;}
+.step p{color:var(--text2);font-size:.875rem;line-height:1.6;}
+.step-arrow{font-size:1.5rem;color:var(--text3);align-self:center;flex-shrink:0;}
+.tech-grid{display:flex;flex-wrap:wrap;gap:.8rem;margin-top:2rem;justify-content:center;}
+.tech-item{display:flex;align-items:center;gap:.6rem;background:var(--card);border:1px solid var(--border);border-radius:99px;padding:.55rem 1.2rem;font-size:.85rem;font-weight:500;transition:all .2s;}
+.tech-item:hover{border-color:var(--gold);color:var(--gold);}
+.section-block{padding:5rem 0;border-top:1px solid var(--border);}
+
+/* ════ PREDICT PAGE ════ */
+.predict-layout{display:grid;grid-template-columns:1fr 400px;gap:1.5rem;align-items:start;max-width:1280px;margin:0 auto;}
+.result-col{display:flex;flex-direction:column;gap:1.25rem;}
+.form-panel{padding:2rem;}
+.fp-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.75rem;}
+.fp-title{font-size:1.05rem;font-weight:700;}
+.field-section{margin-bottom:1.75rem;}
+.fs-label{font-size:.65rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);padding-bottom:.5rem;margin-bottom:.9rem;border-bottom:1px solid var(--border);}
+.fields-2{display:grid;grid-template-columns:1fr 1fr;gap:.9rem;}
+.field-group{display:flex;flex-direction:column;gap:.35rem;position:relative;z-index:5;}
+.field-group:focus-within{z-index:100;}
+.field-group label{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);}
+.sel-wrap{position:relative;}
+.sel-wrap select{width:100%;display:block!important;visibility:visible!important;-webkit-appearance:none;appearance:none;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:.65rem 2.2rem .65rem .9rem;font-family:var(--fb);font-size:.9rem;cursor:pointer;outline:none;transition:border-color .2s;}
+.sel-wrap select:focus{border-color:var(--gold);box-shadow:0 0 0 3px rgba(245,158,11,.1);}
+.sel-wrap select option{background:#111827;color:var(--text);}
+.sel-wrap select:disabled{opacity:.4;cursor:not-allowed;}
+.sel-icon{position:absolute;right:.8rem;top:50%;transform:translateY(-50%);width:12px;height:8px;color:var(--text3);pointer-events:none;}
+.sliders-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.2rem;margin-bottom:1.5rem;}
+.sfield{display:flex;flex-direction:column;gap:.5rem;}
+.sfield.full{grid-column:1/-1;}
+.sf-row{display:flex;justify-content:space-between;align-items:center;}
+.sf-row span:first-child{font-size:.68rem;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);}
+.sf-val{font-family:var(--fm);font-size:.75rem;color:var(--gold);font-weight:500;}
+.sf-ends{display:flex;justify-content:space-between;font-size:.62rem;color:var(--text3);}
+.cslider{width:100%;-webkit-appearance:none;height:3px;border-radius:99px;background:linear-gradient(90deg,var(--gold) var(--f,15%),rgba(255,255,255,.07) var(--f,15%));outline:none;cursor:pointer;transition:height .15s;}
+.cslider:hover{height:4px;}
+.cslider::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;border-radius:50%;background:var(--gold);border:3px solid var(--bg);box-shadow:0 0 0 2px var(--gold),0 0 14px rgba(245,158,11,.45);cursor:pointer;transition:.2s;}
+.cslider:hover::-webkit-slider-thumb{transform:scale(1.15);}
+.predict-btn{position:relative;width:100%;overflow:hidden;padding:1rem 2rem;border:none;border-radius:var(--r);cursor:pointer;transition:.3s;background:linear-gradient(135deg,#b45309,var(--gold),var(--gold2));color:#000;box-shadow:0 0 30px rgba(245,158,11,.3);margin-top:.5rem;}
+.predict-btn:hover{transform:translateY(-2px);box-shadow:0 0 50px rgba(245,158,11,.5);}
+.predict-btn.loading{opacity:.7;pointer-events:none;}
+.pb-shine{position:absolute;inset:0;background:linear-gradient(90deg,transparent,rgba(255,255,255,.25),transparent);transform:translateX(-100%);animation:shimmer 2s infinite;}
+@keyframes shimmer{100%{transform:translateX(100%)}}
+.pb-inner{position:relative;display:flex;align-items:center;justify-content:center;gap:.6rem;font-family:var(--fh);font-size:1.3rem;letter-spacing:.05em;}
+.pb-arr{position:absolute;right:1.2rem;font-size:1.2rem;transition:transform .2s;}
+.predict-btn:hover .pb-arr{transform:translateX(4px);}
+.res-card{min-height:280px;display:flex;align-items:center;justify-content:center;padding:2rem;}
+.res-empty{text-align:center;}
+.re-ico{margin-bottom:1rem;opacity:.8;animation:float 3s ease-in-out infinite;}
+.re-title{font-family:var(--fh);font-size:1.5rem;color:var(--text2);margin-bottom:.4rem;}
+.re-desc{color:var(--text3);font-size:.875rem;max-width:200px;line-height:1.5;}
+.res-result{width:100%;}
+.rr-algo{display:inline-block;font-family:var(--fm);font-size:.68rem;color:var(--gold);background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.2);padding:.25rem .8rem;border-radius:99px;margin-bottom:.8rem;}
+.rr-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.12em;color:var(--text3);}
+.rr-price{font-family:var(--fh);font-size:3rem;color:var(--gold);line-height:1;margin:.3rem 0 1.2rem;animation:scaleIn .5s cubic-bezier(.34,1.56,.64,1) both;}
+@keyframes scaleIn{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:scale(1)}}
+.rr-range{display:flex;align-items:center;gap:.5rem;background:rgba(255,255,255,.03);border-radius:12px;padding:.9rem;margin-bottom:.8rem;border:1px solid var(--border);}
+.rrr{flex:1;}.rrr.right{text-align:right;}
+.rrrl{font-size:.62rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);}
+.rrrv{font-family:var(--fm);font-size:.85rem;color:var(--text2);margin-top:.2rem;}
+.rrr-wave{width:80px;flex-shrink:0;}
+.rr-chips{display:flex;flex-wrap:wrap;gap:.4rem;margin:.8rem 0 1rem;}
+.full-w{width:100%;justify-content:center;}
+.breakdown-card{padding:1.5rem;}
+.bc-title{font-size:.9rem;font-weight:700;margin-bottom:1rem;}
+.bc-grid{display:grid;grid-template-columns:1fr 1fr;gap:.65rem;}
+.bc-item{background:rgba(255,255,255,.03);border-radius:9px;padding:.7rem .9rem;border:1px solid var(--border);}
+.bc-lbl{font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);}
+.bc-val{font-family:var(--fm);font-size:.85rem;color:var(--text);margin-top:.2rem;font-weight:500;}
+
+/* ════ ANALYTICS PAGE ════ */
+.kpi-strip{display:flex;flex-wrap:wrap;gap:.8rem;margin-bottom:2rem;}
+.kpi-card{flex:1;min-width:130px;padding:1.1rem 1.3rem;transition:all .2s;}
+.kpi-card:hover{border-color:rgba(245,158,11,.3);transform:translateY(-2px);}
+.kc-v{font-family:var(--fh);font-size:1.7rem;color:var(--gold);line-height:1;}
+.kc-l{font-size:.66rem;text-transform:uppercase;letter-spacing:.09em;color:var(--text3);margin-top:.2rem;}
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:1.25rem;}
+.chart-card{padding:1.75rem;}
+.chart-card.wide{grid-column:1/-1;}
+.chart-card canvas{max-height:300px;}
+.cc-title{font-size:.9rem;font-weight:700;margin-bottom:1.2rem;display:flex;align-items:center;gap:.5rem;}
+.cc-sub{font-size:.72rem;color:var(--text3);font-weight:400;}
+
+/* ════ MODELS PAGE ════ */
+.podium{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem;}
+.podium-card{background:var(--card);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:var(--r2);padding:1.5rem;position:relative;transition:all .25s;}
+.podium-card:hover{transform:translateY(-3px);box-shadow:0 14px 45px rgba(0,0,0,.55);}
+.pc-best{border-color:rgba(245,158,11,.4);background:rgba(245,158,11,.03);}
+.pc-medal{font-size:1.8rem;margin-bottom:.5rem;}
+.pc-name{font-size:.85rem;font-weight:700;margin-bottom:.3rem;}
+.pc-r2{font-family:var(--fh);font-size:2.5rem;color:var(--gold);line-height:1;}
+.pc-sub{font-size:.65rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text3);margin-bottom:.8rem;}
+.pc-bar{height:3px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden;}
+.pc-fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold2));border-radius:99px;}
+.pc-badge{position:absolute;top:.9rem;right:.9rem;font-size:.58rem;font-weight:700;letter-spacing:.08em;padding:.2rem .55rem;border-radius:99px;background:var(--gold);color:#000;}
+.fi-layout{display:grid;grid-template-columns:1fr 320px;gap:1.25rem;align-items:start;margin-top:1.5rem;}
+.fi-chart canvas{max-height:480px;}
+.fi-items{display:flex;flex-direction:column;gap:.8rem;}
+.fi-item{background:var(--card);border:1px solid var(--border);border-radius:var(--r);padding:1rem 1.2rem;transition:.2s;}
+.fi-item:hover{border-color:rgba(245,158,11,.3);}
+.fii-rank{font-size:1.3rem;margin-bottom:.2rem;}
+.fii-name{font-weight:700;font-size:.9rem;}
+.fii-pct{font-family:var(--fm);font-size:.75rem;color:var(--gold);margin:.2rem 0 .5rem;}
+.fii-bar{height:3px;background:rgba(255,255,255,.06);border-radius:99px;overflow:hidden;}
+.fii-fill{height:100%;background:linear-gradient(90deg,var(--gold),var(--gold2));border-radius:99px;transition:width .8s ease;}
+.mtable-card{padding:1.75rem;margin-top:1.25rem;}
+.tscroll{overflow-x:auto;}
+.styled-table{width:100%;border-collapse:collapse;font-size:.875rem;}
+.styled-table th{padding:.75rem 1rem;text-align:left;font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text3);border-bottom:1px solid var(--border);white-space:nowrap;font-family:var(--fm);}
+.styled-table td{padding:.8rem 1rem;border-bottom:1px solid rgba(255,255,255,.03);color:var(--text2);}
+.styled-table tr:last-child td{border-bottom:none;}
+.styled-table tbody tr:hover td{background:rgba(255,255,255,.02);}
+.tr-best td{color:var(--text)!important;}
+.badge-best{display:inline-block;font-size:.58rem;font-weight:700;letter-spacing:.08em;padding:.15rem .5rem;border-radius:99px;background:var(--gold);color:#000;margin-left:.4rem;vertical-align:middle;}
+.val-green{color:var(--green)!important;font-weight:700;}
+
+/* ════ HISTORY PAGE ════ */
+.hist-kpis{display:flex;gap:.9rem;flex-wrap:wrap;margin-bottom:1.5rem;}
+.hkpi{flex:1;min-width:140px;padding:1.2rem 1.4rem;transition:.2s;}
+.hkpi:hover{border-color:rgba(245,158,11,.3);transform:translateY(-2px);}
+.hkv{font-family:var(--fh);font-size:1.9rem;color:var(--gold);line-height:1;}
+.hkl{font-size:.66rem;text-transform:uppercase;letter-spacing:.09em;color:var(--text3);margin-top:.2rem;}
+.trend-card{padding:1.5rem;margin-bottom:1.5rem;display:none;}
+.hist-toolbar{display:flex;align-items:center;justify-content:space-between;gap:1rem;margin-bottom:1rem;flex-wrap:wrap;}
+.ht-left{display:flex;align-items:center;gap:.9rem;flex-wrap:wrap;}
+.ht-right{display:flex;gap:.6rem;}
+.ht-count{font-size:.875rem;color:var(--text2);}
+.search-wrap{display:flex;align-items:center;gap:.5rem;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:9px;padding:.4rem .9rem;}
+.search-wrap input{background:none;border:none;outline:none;color:var(--text);font-family:var(--fb);font-size:.875rem;width:200px;}
+.search-wrap input::placeholder{color:var(--text3);}
+.hist-table-card{padding:0;overflow:hidden;}
+.hist-tbl th,.hist-tbl td{white-space:nowrap;}
+.td-price{font-family:var(--fm);color:var(--gold)!important;font-weight:600;}
+.td-mono{font-family:var(--fm);font-size:.82rem;}
+.td-bold{color:var(--text)!important;font-weight:600;}
+.fuel-chip{display:inline-block;font-size:.68rem;padding:.15rem .6rem;border-radius:99px;background:rgba(59,130,246,.1);color:#93c5fd;border:1px solid rgba(59,130,246,.2);}
+.empty-state{text-align:center;padding:4rem 2rem;}
+.empty-state p{color:var(--text3);margin-bottom:1.5rem;}
+
+/* Animations */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:none}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.fade-up{animation:fadeUp .6s ease both;}
+.d1{animation-delay:.1s;}.d2{animation-delay:.2s;}.d3{animation-delay:.3s;}.d4{animation-delay:.4s;}
+
+/* RESPONSIVE */
+@media(max-width:1000px){
+  .predict-layout,.fi-layout{grid-template-columns:1fr;}
+  .result-col{order:-1;}
+  .charts-grid{grid-template-columns:1fr;}
+  .chart-card.wide{grid-column:1;}
+  .podium{grid-template-columns:1fr 1fr;}
+  .feat-grid{grid-template-columns:1fr 1fr;}
+  .hero{flex-direction:column;padding:2rem 0 3rem;}
+  .hero-visual{display:none;}
+  .steps{flex-direction:column;}
+  .step-arrow{transform:rotate(90deg);align-self:center;}
+  .nav-tabs{gap:0;}
+  .ntab .nn{display:none;}
+}
+@media(max-width:640px){
+  .tab-section{padding:80px 1.2rem 3rem;}
+  .fields-2{grid-template-columns:1fr;}
+  .sliders-grid{grid-template-columns:1fr;}
+  .sfield.full{grid-column:1;}
+  .feat-grid{grid-template-columns:1fr;}
+  .podium{grid-template-columns:1fr;}
+  .hero-title{font-size:3rem;}
+  .navbar{padding:0 1.2rem;}
+  .search-wrap input{width:130px;}
+}
+
+
+
+/* ════ PRICE BREAKDOWN ════ */
+.price-breakdown{margin-top:1.25rem;}
+.pb2-title{font-size:.9rem;font-weight:700;margin-bottom:1rem;}
+.pb2-item{display:flex;align-items:center;justify-content:space-between;padding:.6rem .9rem;border-radius:9px;background:rgba(255,255,255,.02);border:1px solid var(--border);margin-bottom:.5rem;transition:.2s;}
+.pb2-item:hover{border-color:rgba(245,158,11,.3);}
+.pb2-label{font-size:.8rem;color:var(--text2);}
+.pb2-val{font-family:var(--fm);font-size:.82rem;color:var(--text);font-weight:600;}
+.pb2-bar-wrap{height:2px;background:rgba(255,255,255,.06);border-radius:99px;margin-top:.4rem;overflow:hidden;}
+.pb2-bar{height:100%;border-radius:99px;transition:width 1s ease;}
+
+/* ════ REPORT DOWNLOAD ════ */
+.report-btns{display:flex;gap:.6rem;margin-top:.75rem;flex-wrap:wrap;}
+.rprt-btn{flex:1;min-width:120px;display:flex;align-items:center;justify-content:center;gap:.5rem;padding:.65rem 1rem;border-radius:10px;font-family:var(--fb);font-size:.8rem;font-weight:600;cursor:pointer;transition:all .2s;border:1px solid;}
+.rprt-btn-csv{background:rgba(16,185,129,.08);color:#34d399;border-color:rgba(16,185,129,.3);}
+.rprt-btn-csv:hover{background:rgba(16,185,129,.15);transform:translateY(-1px);}
+.rprt-btn-pdf{background:rgba(239,68,68,.08);color:#f87171;border-color:rgba(239,68,68,.3);}
+.rprt-btn-pdf:hover{background:rgba(239,68,68,.15);transform:translateY(-1px);}
+.rprt-btn-json{background:rgba(99,102,241,.08);color:#a5b4fc;border-color:rgba(99,102,241,.3);}
+.rprt-btn-json:hover{background:rgba(99,102,241,.15);transform:translateY(-1px);}
+
+/* ════ PIN LOCK ════ */
+.pin-overlay{position:fixed;inset:0;z-index:9000;background:rgba(5,8,15,.97);backdrop-filter:blur(20px);display:flex;align-items:center;justify-content:center;flex-direction:column;}
+.pin-card{background:var(--card);border:1px solid var(--border);border-radius:var(--r2);padding:2.5rem;width:340px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.8);}
+.pin-icon{font-size:2.5rem;margin-bottom:1rem;}
+.pin-title{font-family:var(--fh);font-size:2rem;margin-bottom:.4rem;}
+.pin-desc{color:var(--text3);font-size:.875rem;margin-bottom:1.5rem;line-height:1.5;}
+.pin-dots{display:flex;justify-content:center;gap:.6rem;margin-bottom:1.5rem;}
+.pin-dot{width:14px;height:14px;border-radius:50%;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);transition:all .2s;}
+.pin-dot.filled{background:var(--gold);border-color:var(--gold);box-shadow:0 0 10px rgba(245,158,11,.5);}
+.pin-dot.error{background:var(--red);border-color:var(--red);}
+.pin-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:.7rem;margin-bottom:1rem;}
+.pin-key{padding:.9rem;border-radius:10px;background:rgba(255,255,255,.04);border:1px solid var(--border);color:var(--text);font-family:var(--fh);font-size:1.5rem;cursor:pointer;transition:all .2s;}
+.pin-key:hover{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.3);color:var(--gold);}
+.pin-key.del{font-size:1.1rem;color:var(--text3);}
+.pin-hint{font-size:.72rem;color:var(--text3);}
+.pin-error-msg{color:var(--red);font-size:.8rem;margin-top:.5rem;min-height:1.2em;}
+</style>
+</head>
+<body>
+<canvas id="bgCanvas"></canvas>
+<div id="cursorGlow"></div>
+
+<!-- ═══ NAVBAR ═══ -->
+<nav class="navbar" id="navbar">
+  <div class="nav-logo" onclick="showTab('home')">
+    <div class="nav-logo-icon">🚗</div>
+    <span class="nav-logo-text">CarValue<em>AI</em></span>
+  </div>
+  <div class="nav-tabs">
+    <button class="ntab active" onclick="showTab('home')"><span class="nn">01</span>Home</button>
+    <button class="ntab" onclick="showTab('predict')"><span class="nn">02</span>Predict</button>
+    <button class="ntab" onclick="showTab('analytics')"><span class="nn">03</span>Analytics</button>
+    <button class="ntab" onclick="showTab('models')"><span class="nn">04</span>Models</button>
+    <button class="ntab" onclick="showTab('history')"><span class="nn">05</span>History</button>
+  </div>
+  <div class="nav-status">
+    <span class="ns-dot" id="nsDot"></span>
+    <span id="nsText">Offline</span>
+  </div>
+</nav>
+
+<!-- ═══ HOME TAB ═══ -->
+<div class="tab-section active" id="tab-home">
+<div class="container">
+  <div class="hero">
+    <div class="hero-content">
+      <div class="eyebrow fade-up">Machine Learning · MySQL · Real-time Predictions</div>
+      <h1 class="hero-title fade-up d1">
+        <span>KNOW YOUR</span>
+        <span class="hero-title-gold">CAR'S TRUE</span>
+        <span>MARKET VALUE</span>
+      </h1>
+      <p class="hero-desc fade-up d2">AI-powered used car valuation using 4 competing ML algorithms trained on 3,000+ records. Get instant predictions with confidence ranges.</p>
+      <div class="hero-ctas fade-up d3">
+        <button class="btn-gold" onclick="showTab('predict')">⭐ Predict Price Now</button>
+        <button class="btn-outline" onclick="showTab('analytics')">View Analytics →</button>
+      </div>
+      <div class="hero-stats fade-up d4">
+        <div class="hs-item"><div class="hs-num">3,000+</div><div class="hs-lbl">Cars Analyzed</div></div>
+        <div class="hs-div"></div>
+        <div class="hs-item"><div class="hs-num">90.5%</div><div class="hs-lbl">Best R² Score</div></div>
+        <div class="hs-div"></div>
+        <div class="hs-item"><div class="hs-num" id="homePreds">0</div><div class="hs-lbl">Predictions Made</div></div>
+        <div class="hs-div"></div>
+        <div class="hs-item"><div class="hs-num">15</div><div class="hs-lbl">Car Brands</div></div>
+      </div>
+    </div>
+    <div class="hero-visual">
+      <div class="hv-ring r1"></div><div class="hv-ring r2"></div><div class="hv-ring r3"></div>
+      <div class="hv-card glass">
+        <div class="hvc-hdr"><div class="hvc-dot g"></div><div class="hvc-dot y"></div><div class="hvc-dot r"></div><span>AI Valuation</span></div>
+        <div class="hvc-emoji">🚘</div>
+        <div class="hvc-lbl">Estimated Market Price</div>
+        <div class="hvc-price">₹ 8,45,000</div>
+        <div class="hvc-range"><span>₹7.77L</span><div class="hvc-track"><div class="hvc-fill"></div></div><span>₹9.13L</span></div>
+        <div class="hvc-tags"><span class="chip chip-gold">Petrol</span><span class="chip chip-blue">Automatic</span><span class="chip chip-green">First Owner</span></div>
+        <div class="hvc-model">Gradient Boosting · R²=0.91</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="eyebrow">What We Offer</div>
+    <h2 class="sec-title">Everything You Need to <span class="gold">Value Any Car</span></h2>
+    <div class="feat-grid">
+      <div class="feat-card glass"><div class="fc-icon ico-g">🔮</div><h3>AI Price Prediction</h3><p>4 ML algorithms compete — Gradient Boosting, Random Forest, Extra Trees, Ridge — best model wins automatically.</p><span class="fc-link" onclick="showTab('predict')">Try it →</span></div>
+      <div class="feat-card glass"><div class="fc-icon ico-b">📊</div><h3>Data Analytics</h3><p>Deep EDA with 5 interactive charts — price distributions, brand comparisons, year trends, fuel splits.</p><span class="fc-link" onclick="showTab('analytics')">Explore →</span></div>
+      <div class="feat-card glass"><div class="fc-icon ico-e">📈</div><h3>Model Performance</h3><p>Compare R², MAE, RMSE, MAPE across all 4 algorithms. See exactly which model earned its place.</p><span class="fc-link" onclick="showTab('models')">Compare →</span></div>
+      <div class="feat-card glass"><div class="fc-icon ico-y">🏛️</div><h3>Feature Importance</h3><p>Understand which factors — year, brand, mileage, fuel — drive used car prices the most.</p><span class="fc-link" onclick="showTab('models')">Discover →</span></div>
+      <div class="feat-card glass"><div class="fc-icon ico-r">📋</div><h3>Prediction History</h3><p>Every prediction auto-saved locally. Browse, export CSV, or clear your full valuation history.</p><span class="fc-link" onclick="showTab('history')">View →</span></div>
+      <div class="feat-card glass"><div class="fc-icon ico-p">⚡</div><h3>Works Offline</h3><p>Fully functional without any backend. Built-in price estimator using 15 brand datasets.</p><span class="fc-link" onclick="showTab('predict')">Start →</span></div>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="eyebrow">Simple Process</div>
+    <h2 class="sec-title">How It <span class="gold">Works</span></h2>
+    <div class="steps">
+      <div class="step"><div class="step-num">01</div><h3>Select Your Car</h3><p>Choose brand, model, year, fuel type, transmission, and ownership details.</p></div>
+      <div class="step-arrow">→</div>
+      <div class="step"><div class="step-num">02</div><h3>Set Specifications</h3><p>Adjust KM driven, engine CC, max power, and mileage using intuitive sliders.</p></div>
+      <div class="step-arrow">→</div>
+      <div class="step"><div class="step-num">03</div><h3>Get AI Valuation</h3><p>Instant predicted price with confidence range, saved to history automatically.</p></div>
+    </div>
+    <div style="text-align:center;">
+      <button class="btn-gold" onclick="showTab('predict')">Start Predicting →</button>
+    </div>
+  </div>
+
+  <div class="section-block">
+    <div class="eyebrow">Built With</div>
+    <div class="tech-grid">
+      <div class="tech-item"><span>🌐</span>HTML5</div>
+      <div class="tech-item"><span>🎨</span>CSS3</div>
+      <div class="tech-item"><span>⚡</span>JavaScript</div>
+      <div class="tech-item"><span>🐍</span>Python Flask</div>
+      <div class="tech-item"><span>🗄️</span>MySQL</div>
+      <div class="tech-item"><span>🤖</span>scikit-learn</div>
+      <div class="tech-item"><span>📊</span>Chart.js</div>
+      <div class="tech-item"><span>🔢</span>Pandas/NumPy</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ PREDICT TAB ═══ -->
+<div class="tab-section" id="tab-predict">
+<div class="eyebrow" style="margin-left:0">AI Valuation Engine</div>
+<h1 class="sec-title">Price <span class="gold">Prediction</span></h1>
+<p class="sec-desc">Configure your car's details and get an instant ML-powered market valuation</p>
+<div class="predict-layout">
+  <div class="form-panel glass">
+    <div class="fp-top"><span class="fp-title">Car Configuration</span><span class="chip chip-gold">ML Powered</span></div>
+    <div class="field-section">
+      <div class="fs-label">Identity</div>
+      <div class="fields-2">
+        <div class="field-group"><label>Brand</label>
+          <div class="sel-wrap"><select id="brandSel" onchange="onBrandChange()"><option value="">— Select Brand —</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Model</label>
+          <div class="sel-wrap"><select id="modelSel" disabled><option value="">Select brand first</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Year</label>
+          <div class="sel-wrap"><select id="yearSel"></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Seats</label>
+          <div class="sel-wrap"><select id="seatsSel"><option value="5" selected>5</option><option value="2">2</option><option value="4">4</option><option value="6">6</option><option value="7">7</option><option value="8">8</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+      </div>
+    </div>
+    <div class="field-section">
+      <div class="fs-label">Type & Ownership</div>
+      <div class="fields-2">
+        <div class="field-group"><label>Fuel Type</label>
+          <div class="sel-wrap"><select id="fuelSel"><option>Petrol</option><option>Diesel</option><option>CNG</option><option>Electric</option><option>Hybrid</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Transmission</label>
+          <div class="sel-wrap"><select id="transSel"><option>Manual</option><option>Automatic</option><option>CVT</option><option>DCT</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Ownership</label>
+          <div class="sel-wrap"><select id="ownerSel"><option>First Owner</option><option>Second Owner</option><option>Third Owner</option><option>Fourth & Above Owner</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+        <div class="field-group"><label>Seller Type</label>
+          <div class="sel-wrap"><select id="sellerSel"><option>Individual</option><option>Dealer</option><option>Trustmark Dealer</option></select><svg class="sel-icon" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div>
+        </div>
+      </div>
+    </div>
+    <div class="field-section">
+      <div class="fs-label">Technical Specifications</div>
+      <div class="sliders-grid">
+        <div class="sfield full"><div class="sf-row"><span>KM Driven</span><span class="sf-val" id="kmV">45,000 km</span></div><input type="range" class="cslider" id="kmSl" min="100" max="300000" value="45000" step="1000"/><div class="sf-ends"><span>100</span><span>3,00,000 km</span></div></div>
+        <div class="sfield"><div class="sf-row"><span>Engine (CC)</span><span class="sf-val" id="engV">1500 cc</span></div><input type="range" class="cslider" id="engSl" min="600" max="5000" value="1500" step="50"/><div class="sf-ends"><span>600</span><span>5000</span></div></div>
+        <div class="sfield"><div class="sf-row"><span>Max Power (HP)</span><span class="sf-val" id="hpV">100 HP</span></div><input type="range" class="cslider" id="hpSl" min="40" max="600" value="100" step="5"/><div class="sf-ends"><span>40</span><span>600</span></div></div>
+        <div class="sfield full"><div class="sf-row"><span>Mileage (km/l)</span><span class="sf-val" id="mlV">18.0 km/l</span></div><input type="range" class="cslider" id="mlSl" min="5" max="40" value="18" step="0.5"/><div class="sf-ends"><span>5</span><span>40</span></div></div>
+      </div>
+    </div>
+    <button class="predict-btn" id="predictBtn" onclick="doPrediction()">
+      <span class="pb-shine"></span>
+      <span class="pb-inner">⭐ Predict Market Price</span>
+      <span class="pb-arr">→</span>
+    </button>
+  </div>
+  <div class="result-col">
+    <div class="res-card glass" id="resCard">
+      <div class="res-empty" id="resEmpty">
+        <div class="re-ico"><svg width="64" height="64" viewBox="0 0 64 64" fill="none"><circle cx="32" cy="32" r="30" stroke="rgba(245,158,11,0.2)" stroke-width="1.5" stroke-dasharray="6 6"/><circle cx="32" cy="32" r="20" stroke="rgba(245,158,11,0.1)" stroke-width="1"/><path d="M32 20v12l8 8" stroke="rgba(245,158,11,0.5)" stroke-width="2" stroke-linecap="round"/></svg></div>
+        <div class="re-title">Awaiting Input</div>
+        <div class="re-desc">Select a brand and model, configure specs, then hit predict</div>
+      </div>
+      <div class="res-result" id="resResult" style="display:none">
+        <div class="rr-algo" id="rrAlgo"></div>
+        <div class="rr-label">Estimated Market Price</div>
+        <div class="rr-price" id="rrPrice">₹0</div>
+        <div class="rr-range">
+          <div class="rrr"><div class="rrrl">Low</div><div class="rrrv" id="rrLow">—</div></div>
+          <svg class="rrr-wave" viewBox="0 0 80 24" fill="none"><path d="M0 12 Q20 4 40 12 Q60 20 80 12" stroke="rgba(245,158,11,0.4)" stroke-width="1.5" fill="none"/></svg>
+          <div class="rrr right"><div class="rrrl">High</div><div class="rrrv" id="rrHigh">—</div></div>
+        </div>
+        <canvas id="gaugeChart" height="110"></canvas>
+        <div class="rr-chips" id="rrChips"></div>
+
+      </div>
+    </div>
+    <!-- PRICE BREAKDOWN — price ke neeche -->
+    <div class="glass" id="priceBreakdownPanel" style="padding:1.5rem;display:none">
+      <div class="pb2-title">💰 Price Breakdown Analysis</div>
+      <div id="pb2Items"></div>
+    </div>
+
+    <!-- SPECS BREAKDOWN -->
+    <div class="breakdown-card glass" id="breakdownCard" style="display:none">
+      <div class="bc-title">Analysis Breakdown</div>
+      <div class="bc-grid" id="bcGrid"></div>
+      <button class="btn-ghost full-w" style="margin-top:1rem" onclick="showTab('history')">📋 View Full History</button>
+    </div>
+
+    <!-- REPORT DOWNLOAD — sabse neeche -->
+    <div class="glass" id="reportPanel" style="padding:1.5rem;display:none">
+      <div class="pb2-title">📄 Download Report</div>
+      <div class="report-btns">
+        <button class="rprt-btn rprt-btn-csv" onclick="downloadReport('csv')">📊 CSV</button>
+        <button class="rprt-btn rprt-btn-pdf" onclick="downloadReport('pdf')">📋 PDF (Print)</button>
+        <button class="rprt-btn rprt-btn-json" onclick="downloadReport('json')">🗄️ JSON</button>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ ANALYTICS TAB ═══ -->
+<div class="tab-section" id="tab-analytics">
+<div class="container">
+  <div class="eyebrow">Exploratory Data Analysis</div>
+  <h1 class="sec-title">Data <span class="gold">Analytics</span></h1>
+  <p class="sec-desc">Visual insights from 3,000+ car records — charts load with demo data instantly</p>
+  <div class="kpi-strip">
+    <div class="kpi-card glass"><div class="kc-v">3,000</div><div class="kc-l">Total Cars</div></div>
+    <div class="kpi-card glass"><div class="kc-v">₹8.50L</div><div class="kc-l">Average Price</div></div>
+    <div class="kpi-card glass"><div class="kc-v">₹95K</div><div class="kc-l">Min Price</div></div>
+    <div class="kpi-card glass"><div class="kc-v">₹42L</div><div class="kc-l">Max Price</div></div>
+    <div class="kpi-card glass"><div class="kc-v">72K km</div><div class="kc-l">Avg KM Driven</div></div>
+    <div class="kpi-card glass"><div class="kc-v">7.2 yrs</div><div class="kc-l">Avg Car Age</div></div>
+    <div class="kpi-card glass"><div class="kc-v">15</div><div class="kc-l">Car Brands</div></div>
+    <div class="kpi-card glass"><div class="kc-v">67</div><div class="kc-l">Car Models</div></div>
+  </div>
+  <div class="charts-grid">
+    <div class="glass chart-card wide"><div class="cc-title">Price Distribution</div><canvas id="histChart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">Fuel Type Split</div><canvas id="fuelChart"></canvas></div>
+    <div class="glass chart-card wide"><div class="cc-title">Average Price by Brand</div><canvas id="brandChart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">Price Trend by Year</div><canvas id="yearChart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">Transmission Mix</div><canvas id="transChart"></canvas></div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ MODELS TAB ═══ -->
+<div class="tab-section" id="tab-models">
+<div class="container">
+  <div class="eyebrow">Machine Learning</div>
+  <h1 class="sec-title">Model <span class="gold">Performance</span></h1>
+  <p class="sec-desc">4 ML algorithms trained and compared — best model auto-selected</p>
+  <div class="podium" id="podium"></div>
+  <div class="charts-grid">
+    <div class="glass chart-card"><div class="cc-title">R² Score <span class="cc-sub">higher=better</span></div><canvas id="r2Chart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">MAE <span class="cc-sub">lower=better</span></div><canvas id="maeChart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">RMSE Comparison</div><canvas id="rmseChart"></canvas></div>
+    <div class="glass chart-card"><div class="cc-title">MAPE % <span class="cc-sub">lower=better</span></div><canvas id="mapeChart"></canvas></div>
+  </div>
+  <div class="glass mtable-card"><div class="cc-title">Full Metrics Table</div><div class="tscroll"><table class="styled-table" id="metricsTable"></table></div></div>
+  <div style="padding-top:2rem">
+    <div class="eyebrow" style="margin-top:1rem">Feature Analysis</div>
+    <h2 class="sec-title">Feature <span class="gold">Importance</span></h2>
+    <p class="sec-desc">Which car attributes influence price the most?</p>
+    <div class="fi-layout">
+      <div class="glass chart-card fi-chart"><div class="cc-title">Importance Ranking</div><canvas id="fiChart"></canvas></div>
+      <div class="fi-items" id="fiItems"></div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ HISTORY TAB ═══ -->
+<div class="tab-section" id="tab-history">
+<div class="container">
+  <div class="eyebrow">Prediction Storage</div>
+  <h1 class="sec-title">Prediction <span class="gold">History</span></h1>
+  <p class="sec-desc">Every prediction auto-saved locally — browse, search, export or clear</p>
+  <div class="hist-kpis">
+    <div class="hkpi glass"><div class="hkv" id="hkTotal">0</div><div class="hkl">Total Predictions</div></div>
+    <div class="hkpi glass"><div class="hkv" id="hkAvg">—</div><div class="hkl">Average Price</div></div>
+    <div class="hkpi glass"><div class="hkv" id="hkTop">—</div><div class="hkl">Highest Prediction</div></div>
+    <div class="hkpi glass"><div class="hkv" id="hkBrands">—</div><div class="hkl">Brands Predicted</div></div>
+  </div>
+  <div class="glass trend-card" id="trendCard"><div class="cc-title">Price Trend</div><canvas id="trendChart" height="80"></canvas></div>
+  <div class="hist-toolbar">
+    <div class="ht-left">
+      <span class="ht-count" id="htCount">0 records</span>
+      <div class="search-wrap">
+        <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="6" cy="6" r="4" stroke="currentColor" stroke-width="1.3"/><path d="M10 10l2.5 2.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <input type="text" id="searchInput" placeholder="Search brand, model…" oninput="filterHistory()"/>
+      </div>
+    </div>
+    <div class="ht-right">
+      <button class="btn-ghost" onclick="exportHistory()">📥 Export CSV</button>
+      <button class="btn-ghost btn-danger" onclick="clearHistory()">🗑️ Clear All</button>
+    </div>
+  </div>
+  <div class="glass hist-table-card">
+    <div class="tscroll">
+      <table class="styled-table" id="histTable">
+        <thead><tr><th>#</th><th>Date & Time</th><th>Brand</th><th>Model</th><th>Year</th><th>Fuel</th><th>Transmission</th><th>Owner</th><th>KM Driven</th><th>Engine</th><th>Power</th><th>Mileage</th><th>Predicted Price</th><th>Range</th></tr></thead>
+        <tbody id="histBody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="empty-state glass" id="emptyState" style="display:none">
+    <div style="font-size:3rem;margin-bottom:1rem">📭</div>
+    <div style="font-family:var(--fh);font-size:1.8rem;color:var(--text2);margin-bottom:.5rem">No Predictions Yet</div>
+    <p>Make your first prediction to see it here</p>
+    <button class="btn-gold" onclick="showTab('predict')">Go to Predict →</button>
+  </div>
+</div>
+</div>
+
+<!-- FOOTER -->
+<footer class="footer" id="mainFooter" style="display:none">
+  <div class="footer-inner">
+    <div class="footer-brand">CarValue<em>AI</em></div>
+    <div class="footer-stack"><span>HTML · CSS · JS</span><span>Python Flask</span><span>MySQL</span><span>scikit-learn</span></div>
+  </div>
+</footer>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ══════════════════════════════════════
+   DATA
+══════════════════════════════════════ */
+const BRANDS = {
+  'Audi':['A3','A4','A6','Q3','Q5','Q7'],
+  'BMW':['3 Series','5 Series','7 Series','X1','X3','X5'],
+  'Ford':['Aspire','EcoSport','Endeavour','Figo','Freestyle'],
+  'Honda':['Amaze','City','Civic','CR-V','Jazz','WR-V'],
+  'Hyundai':['Creta','Grand i10','i10','i20','Tucson','Verna','Venue'],
+  'Kia':['Carnival','EV6','Seltos','Sonet'],
+  'Mahindra':['Bolero','Scorpio','Thar','XUV300','XUV500','XUV700'],
+  'Maruti':['Alto','Baleno','Dzire','Ertiga','Swift','Vitara Brezza','Wagon R'],
+  'Mercedes':['A-Class','C-Class','E-Class','GLA','GLC','S-Class'],
+  'MG':['Astor','Gloster','Hector','ZS EV'],
+  'Nissan':['Datsun GO','Kicks','Magnite','Terrano'],
+  'Renault':['Duster','Kiger','Kwid','Triber'],
+  'Tata':['Altroz','Harrier','Nexon','Punch','Safari','Tiago'],
+  'Toyota':['Camry','Fortuner','Glanza','Innova','Urban Cruiser'],
+  'Volkswagen':['Ameo','Polo','T-Roc','Tiguan','Vento'],
+};
+window.BASE_P={Maruti:400000,Hyundai:500000,Honda:600000,Toyota:700000,Ford:550000,Volkswagen:650000,BMW:3000000,Mercedes:3500000,Audi:3200000,Tata:450000,Kia:700000,MG:800000,Mahindra:600000,Renault:400000,Nissan:450000};
+
+/* ══════════════════════════════════════
+   TAB NAVIGATION
+══════════════════════════════════════ */
+const TABS=['home','predict','analytics','models','history'];
+let analyticsLoaded=false, modelsLoaded=false;
+
+function showTab(id){
+  TABS.forEach(t=>{
+    document.getElementById('tab-'+t).classList.toggle('active',t===id);
+  });
+  document.querySelectorAll('.ntab').forEach((b,i)=>{
+    b.classList.toggle('active',TABS[i]===id);
+  });
+  const footer=document.getElementById('mainFooter');
+  if(footer) footer.style.display = id==='home'?'block':'none';
+  window.scrollTo(0,0);
+  if(id==='analytics' && !analyticsLoaded){analyticsLoaded=true; buildAnalyticsCharts();}
+  if(id==='models'    && !modelsLoaded){modelsLoaded=true; buildModelCharts(); buildFIChart();}
+  if(id==='history')  checkPinBeforeHistory();
+  if(id==='home'){
+    const p=getPreds();
+    const el=document.getElementById('homePreds');
+    if(el) el.textContent=p.length;
+  }
+}
+
+/* ══════════════════════════════════════
+   TOAST
+══════════════════════════════════════ */
+let _tt;
+function showToast(msg,type='info'){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.className='toast show '+type;
+  clearTimeout(_tt); _tt=setTimeout(()=>el.classList.remove('show'),3500);
+}
+
+/* ══════════════════════════════════════
+   LOCAL STORAGE
+══════════════════════════════════════ */
+function getPreds(){try{return JSON.parse(localStorage.getItem('cva')||'[]');}catch{return[];}}
+function savePred(d){const l=getPreds();l.unshift({...d,id:Date.now(),ts:new Date().toLocaleString('en-IN')});if(l.length>200)l.splice(200);localStorage.setItem('cva',JSON.stringify(l));}
+function clearPreds(){localStorage.removeItem('cva');}
+
+/* ══════════════════════════════════════
+   FORMAT
+══════════════════════════════════════ */
+function fmtINR(n){
+  n=Math.round(n);
+  if(n>=1e7)return '₹'+(n/1e7).toFixed(2)+' Cr';
+  if(n>=1e5)return '₹'+(n/1e5).toFixed(2)+' L';
+  return '₹'+n.toLocaleString('en-IN');
+}
+
+/* ══════════════════════════════════════
+   CANVAS BG
+══════════════════════════════════════ */
+(function(){
+  const cv=document.getElementById('bgCanvas');
+  if(!cv)return;
+  const ctx=cv.getContext('2d');
+  let W,H,pts;
+  const resize=()=>{
+    W=cv.width=window.innerWidth; H=cv.height=window.innerHeight;
+    pts=Array.from({length:55},()=>({x:Math.random()*W,y:Math.random()*H,vx:(Math.random()-.5)*.25,vy:(Math.random()-.5)*.25,r:Math.random()*1.2+.3,a:Math.random()*.35+.08}));
+  };
+  const draw=()=>{
+    ctx.clearRect(0,0,W,H);
+    pts.forEach(p=>{p.x+=p.vx;p.y+=p.vy;if(p.x<0)p.x=W;if(p.x>W)p.x=0;if(p.y<0)p.y=H;if(p.y>H)p.y=0;ctx.beginPath();ctx.arc(p.x,p.y,p.r,0,Math.PI*2);ctx.fillStyle=`rgba(245,158,11,${p.a})`;ctx.fill();});
+    for(let i=0;i<pts.length;i++)for(let j=i+1;j<pts.length;j++){const dx=pts[i].x-pts[j].x,dy=pts[i].y-pts[j].y,d=Math.hypot(dx,dy);if(d<130){ctx.beginPath();ctx.moveTo(pts[i].x,pts[i].y);ctx.lineTo(pts[j].x,pts[j].y);ctx.strokeStyle=`rgba(59,130,246,${.07*(1-d/130)})`;ctx.lineWidth=.5;ctx.stroke();}}
+    requestAnimationFrame(draw);
+  };
+  resize(); draw(); window.addEventListener('resize',resize);
+})();
+
+/* Cursor glow */
+(function(){
+  const g=document.getElementById('cursorGlow');
+  if(!g)return;
+  let mx=0,my=0,cx=0,cy=0;
+  document.addEventListener('mousemove',e=>{mx=e.clientX;my=e.clientY;});
+  const a=()=>{cx+=(mx-cx)*.1;cy+=(my-cy)*.1;g.style.transform=`translate(${cx-250}px,${cy-250}px)`;requestAnimationFrame(a);};
+  a();
+})();
+
+/* Navbar scroll */
+window.addEventListener('scroll',()=>document.getElementById('navbar').classList.toggle('scrolled',scrollY>20));
+
+/* ══════════════════════════════════════
+   PREDICT FORM INIT
+══════════════════════════════════════ */
+(function initForm(){
+  /* Year dropdown */
+  const ys=document.getElementById('yearSel');
+  if(ys)for(let y=2023;y>=2005;y--)ys.insertAdjacentHTML('beforeend',`<option value="${y}">${y}</option>`);
+
+  /* Brands — ALWAYS from hardcoded data, instant, synchronous */
+  const bs=document.getElementById('brandSel');
+  if(bs){
+    const brands=Object.keys(BRANDS).sort();
+    bs.innerHTML='<option value="">— Select Brand —</option>'+brands.map(b=>`<option value="${b}">${b}</option>`).join('');
+  }
+
+  /* Sliders */
+  const sliders=[
+    ['kmSl','kmV',v=>(+v).toLocaleString('en-IN')+' km'],
+    ['engSl','engV',v=>v+' cc'],
+    ['hpSl','hpV',v=>v+' HP'],
+    ['mlSl','mlV',v=>(+v).toFixed(1)+' km/l'],
+  ];
+  sliders.forEach(([sid,lid,fmt])=>{
+    const sl=document.getElementById(sid),lb=document.getElementById(lid);
+    if(!sl||!lb)return;
+    lb.textContent=fmt(sl.value);
+    setFill(sl);
+    sl.addEventListener('input',()=>{lb.textContent=fmt(sl.value);setFill(sl);});
+  });
+})();
+
+function setFill(sl){
+  const pct=((+sl.value-+sl.min)/(+sl.max-+sl.min))*100;
+  sl.style.setProperty('--f',pct+'%');
+}
+
+function onBrandChange(){
+  const brand=document.getElementById('brandSel').value;
+  const ms=document.getElementById('modelSel');
+  if(!ms)return;
+  if(!brand){ms.innerHTML='<option value="">Select brand first</option>';ms.disabled=true;return;}
+  const models=BRANDS[brand]||[];
+  ms.innerHTML=models.map(m=>`<option value="${m}">${m}</option>`).join('');
+  ms.disabled=false;
+}
+
+/* ══════════════════════════════════════
+   PREDICT LOGIC
+══════════════════════════════════════ */
+let gaugeChart=null, lastPred=null;
+
+function localEstimate(p){
+  const base=BASE_P[p.brand]||600000;
+  const age=2024-(p.year||2020);
+  const dep=Math.max(.2,1-age*.07);
+  const kmf=Math.max(.3,1-(p.km_driven||50000)/500000);
+  const ff={Petrol:1,Diesel:1.1,CNG:.9,Electric:1.3,Hybrid:1.2}[p.fuel_type]||1;
+  const tf={Manual:1,Automatic:1.15,CVT:1.12,DCT:1.18}[p.transmission]||1;
+  const of={'First Owner':1,'Second Owner':.85,'Third Owner':.7,'Fourth & Above Owner':.55}[p.owner]||1;
+  const pp=Math.round(base*dep*kmf*ff*tf*of);
+  return{predicted_price:pp,confidence_low:Math.round(pp*.92),confidence_high:Math.round(pp*1.08),model_used:'Local Estimate',r2_score:0,car_age:age};
+}
+
+async function doPrediction(){
+  const brand=document.getElementById('brandSel').value;
+  const model=document.getElementById('modelSel').value;
+  if(!brand){showToast('⚠️ Please select a Brand','error');return;}
+  if(!model){showToast('⚠️ Please select a Model','error');return;}
+  const btn=document.getElementById('predictBtn');
+  if(btn)btn.classList.add('loading');
+
+  const payload={brand,model_name:model,year:+(document.getElementById('yearSel').value||2020),fuel_type:document.getElementById('fuelSel').value,transmission:document.getElementById('transSel').value,owner:document.getElementById('ownerSel').value,seller_type:document.getElementById('sellerSel').value,km_driven:+(document.getElementById('kmSl').value),engine_cc:+(document.getElementById('engSl').value),max_power_hp:+(document.getElementById('hpSl').value),mileage_kmpl:+(document.getElementById('mlSl').value),seats:+(document.getElementById('seatsSel').value)};
+
+  let res;
+  try{
+    const r=await fetch('http://localhost:5000/api/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(3000)});
+    res=await r.json();
+  }catch{res=localEstimate(payload);}
+
+  lastPred={...payload,...res,ts:new Date().toLocaleString('en-IN')};
+  savePred(lastPred);
+  renderResult(res,payload);
+  if(btn)btn.classList.remove('loading');
+  if(res.model_used!=='Local Estimate')showToast('✅ Prediction saved!','success');
+}
+
+function renderResult(res,p){
+  const{predicted_price:pp,confidence_low:cl,confidence_high:ch,model_used,r2_score,car_age}=res;
+  document.getElementById('resEmpty').style.display='none';
+  document.getElementById('resResult').style.display='block';
+  document.getElementById('breakdownCard').style.display='block';
+  document.getElementById('rrAlgo').textContent=`🤖 ${model_used}${r2_score?' · R² '+(r2_score*100).toFixed(1)+'%':''}`;
+  document.getElementById('rrPrice').textContent=fmtINR(pp);
+  document.getElementById('rrLow').textContent=fmtINR(cl);
+  document.getElementById('rrHigh').textContent=fmtINR(ch);
+  const age=car_age||(2024-+p.year);
+  const ageCls=age<=5?'chip-green':age<=10?'chip-yellow':'chip-red';
+  document.getElementById('rrChips').innerHTML=`<span class="chip chip-gold">${p.fuel_type}</span><span class="chip chip-blue">${p.transmission}</span><span class="chip ${ageCls}">${age} yrs old</span><span class="chip chip-blue">${p.owner}</span>`;
+  const pct=Math.min(Math.max((pp-cl)/(ch-cl),0),1);
+  if(gaugeChart){gaugeChart.destroy();gaugeChart=null;}
+  const ctx=document.getElementById('gaugeChart');
+  if(ctx)gaugeChart=new Chart(ctx,{type:'doughnut',data:{datasets:[{data:[pct,1-pct],backgroundColor:['#f59e0b','rgba(255,255,255,0.04)'],borderWidth:0,circumference:200,rotation:260}]},options:{cutout:'76%',plugins:{legend:{display:false},tooltip:{enabled:false}},animation:{duration:900}}});
+  document.getElementById('bcGrid').innerHTML=[['Brand',p.brand],['Model',p.model_name],['Year',p.year],['KM Driven',(+p.km_driven).toLocaleString('en-IN')+' km'],['Engine',p.engine_cc+' cc'],['Power',p.max_power_hp+' HP'],['Mileage',(+p.mileage_kmpl).toFixed(1)+' km/l'],['Seller',p.seller_type]].map(([l,v])=>`<div class="bc-item"><div class="bc-lbl">${l}</div><div class="bc-val">${v}</div></div>`).join('');
+
+
+  // Price breakdown
+  const pbp=document.getElementById('priceBreakdownPanel');
+  if(pbp){pbp.style.display='block'; buildPriceBreakdown(p,pp);}
+
+  // Report panel
+  const rp=document.getElementById('reportPanel');
+  if(rp) rp.style.display='block';
+}
+
+function doDownload(){
+  if(!lastPred){showToast('No prediction to download','error');return;}
+  const cols=Object.keys(lastPred);
+  const csv=cols.join(',')+'\n'+cols.map(c=>`"${lastPred[c]||''}"`).join(',');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='car_prediction_'+Date.now()+'.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);
+  showToast('📥 Downloaded!','success');
+}
+
+/* ══════════════════════════════════════
+   ANALYTICS CHARTS
+══════════════════════════════════════ */
+Chart.defaults.color='#8b9ab5';Chart.defaults.borderColor='rgba(255,255,255,0.06)';Chart.defaults.font.family="'Plus Jakarta Sans',sans-serif";
+const PAL=['#f59e0b','#3b82f6','#10b981','#ef4444','#8b5cf6','#06b6d4','#ec4899','#f97316','#6366f1','#14b8a6'];
+const CHS={};
+function mkChart(id,cfg){if(CHS[id])CHS[id].destroy();const el=document.getElementById(id);if(!el)return;CHS[id]=new Chart(el,cfg);}
+
+function buildAnalyticsCharts(){
+  const hist=[100000,300000,500000,700000,900000,1100000,1300000,1500000,2000000,3000000].map((b,i)=>({b,c:[42,118,267,389,412,310,198,134,89,41][i]}));
+  mkChart('histChart',{type:'bar',data:{labels:hist.map(r=>`₹${(r.b/1e5).toFixed(0)}L`),datasets:[{data:hist.map(r=>r.c),backgroundColor:hist.map((_,i)=>`hsla(${38+i*4},90%,60%,.8)`),borderRadius:5,borderSkipped:false}]},options:{plugins:{legend:{display:false}},scales:{x:{ticks:{maxRotation:45,font:{size:10}}},y:{beginAtZero:true}}}});
+  mkChart('fuelChart',{type:'doughnut',data:{labels:['Petrol','Diesel','CNG','Electric','Hybrid'],datasets:[{data:[1240,980,310,280,190],backgroundColor:PAL,borderWidth:3,borderColor:'#05080f',hoverOffset:8}]},options:{cutout:'55%',plugins:{legend:{position:'bottom',labels:{padding:14,font:{size:11}}}}}});
+  const brands=[['BMW',3200000],['Mercedes',2800000],['Audi',2600000],['Toyota',780000],['Kia',750000],['MG',720000],['Honda',650000],['Hyundai',580000],['Volkswagen',560000],['Ford',520000],['Tata',490000],['Mahindra',470000],['Maruti',420000],['Renault',390000],['Nissan',380000]];
+  mkChart('brandChart',{type:'bar',data:{labels:brands.map(b=>b[0]),datasets:[{data:brands.map(b=>b[1]),backgroundColor:brands.map((_,i)=>`hsla(${40+i*8},85%,58%,.85)`),borderRadius:5}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>`₹${(v/1e5).toFixed(0)}L`}}}}});
+  const years=[2005,2007,2009,2011,2013,2015,2017,2019,2021,2023].map((y,i)=>({y,p:300000+i*60000}));
+  mkChart('yearChart',{type:'line',data:{labels:years.map(r=>r.y),datasets:[{data:years.map(r=>r.p),borderColor:'#f59e0b',backgroundColor:'rgba(245,158,11,.08)',fill:true,tension:.45,pointRadius:5,pointBackgroundColor:'#f59e0b',pointBorderColor:'#05080f',pointBorderWidth:2}]},options:{plugins:{legend:{display:false}},scales:{y:{ticks:{callback:v=>`₹${(v/1e5).toFixed(0)}L`}}}}});
+  mkChart('transChart',{type:'polarArea',data:{labels:['Manual','Automatic','CVT','DCT'],datasets:[{data:[520000,890000,720000,950000],backgroundColor:PAL.map(c=>c+'cc'),borderWidth:0}]},options:{plugins:{legend:{position:'bottom',labels:{padding:12,font:{size:11}}}}}});
+}
+
+/* ══════════════════════════════════════
+   MODEL CHARTS
+══════════════════════════════════════ */
+const METRICS=[{model:'Gradient Boosting',R2:.9052,MAE:58440,RMSE:138200,MAPE:18.4},{model:'Extra Trees',R2:.8651,MAE:75133,RMSE:163700,MAPE:27.7},{model:'Random Forest',R2:.8373,MAE:81911,RMSE:184900,MAPE:29.1},{model:'Ridge Regression',R2:.4969,MAE:200272,RMSE:321900,MAPE:124.6}];
+const FI=[{f:'Year',v:.281},{f:'KM_Driven',v:.194},{f:'Brand',v:.162},{f:'Car_Age',v:.110},{f:'Engine_CC',v:.083},{f:'Max_Power_HP',v:.062},{f:'Age_Km_Ratio',v:.041},{f:'Owner',v:.022},{f:'Fuel_Type',v:.018},{f:'Transmission',v:.014},{f:'Power_Per_CC',v:.008},{f:'Mileage_KMPL',v:.005}];
+
+function buildModelCharts(){
+  const names=METRICS.map(d=>d.model),clrs=METRICS.map((_,i)=>PAL[i]);
+  function hbar(id,key,fmt){mkChart(id,{type:'bar',data:{labels:names,datasets:[{data:METRICS.map(d=>d[key]),backgroundColor:clrs,borderRadius:6}]},options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{callback:fmt}}},animation:{duration:800}}});}
+  hbar('r2Chart','R2',v=>(v*100).toFixed(1)+'%');
+  hbar('maeChart','MAE',v=>'₹'+Math.round(v).toLocaleString());
+  hbar('rmseChart','RMSE',v=>'₹'+Math.round(v).toLocaleString());
+  hbar('mapeChart','MAPE',v=>v.toFixed(1)+'%');
+  const medals=['🥇','🥈','🥉','4️⃣'];
+  document.getElementById('podium').innerHTML=METRICS.map((d,i)=>`<div class="podium-card ${i===0?'pc-best':''}"><div class="pc-medal">${medals[i]}</div><div class="pc-name">${d.model}</div><div class="pc-r2">${(d.R2*100).toFixed(1)}%</div><div class="pc-sub">R² Score</div><div class="pc-bar"><div class="pc-fill" style="width:${(d.R2*100).toFixed(1)}%"></div></div>${i===0?'<div class="pc-badge">BEST</div>':''}</div>`).join('');
+  document.getElementById('metricsTable').innerHTML=`<thead><tr><th>Model</th><th>R²</th><th>MAE</th><th>RMSE</th><th>MAPE</th></tr></thead><tbody>${METRICS.map((d,i)=>`<tr class="${i===0?'tr-best':''}"><td>${d.model}${i===0?'<span class="badge-best">BEST</span>':''}</td><td class="${i===0?'val-green':''}">${(d.R2*100).toFixed(2)}%</td><td>₹${Math.round(d.MAE).toLocaleString()}</td><td>₹${Math.round(d.RMSE).toLocaleString()}</td><td>${d.MAPE.toFixed(2)}%</td></tr>`).join('')}</tbody>`;
+}
+
+function buildFIChart(){
+  const top=FI.slice(0,12).reverse();
+  mkChart('fiChart',{type:'bar',data:{labels:top.map(d=>d.f),datasets:[{data:top.map(d=>d.v),backgroundColor:top.map((_,i)=>`hsla(${218+i*9},75%,${50+i*2}%,.85)`),borderRadius:5}]},options:{indexAxis:'y',plugins:{legend:{display:false}},scales:{x:{beginAtZero:true,ticks:{callback:v=>(v*100).toFixed(1)+'%'}}},animation:{duration:900}}});
+  const icons=['🥇','🥈','🥉','4️⃣','5️⃣'];
+  document.getElementById('fiItems').innerHTML=FI.slice(0,5).map((d,i)=>`<div class="fi-item"><div class="fii-rank">${icons[i]}</div><div class="fii-name">${d.f}</div><div class="fii-pct">${(d.v*100).toFixed(2)}% importance</div><div class="fii-bar"><div class="fii-fill" style="width:${(d.v/FI[0].v*100).toFixed(1)}%"></div></div></div>`).join('');
+}
+
+/* ══════════════════════════════════════
+   HISTORY
+══════════════════════════════════════ */
+let allRows=[];
+function renderHistory(){
+  allRows=getPreds();
+  updateHistKPIs(allRows);
+  buildTrend(allRows);
+  renderHistTable(allRows);
+}
+
+function updateHistKPIs(rows){
+  document.getElementById('hkTotal').textContent=rows.length;
+  const prices=rows.map(r=>+(r.predicted_price||0)).filter(Boolean);
+  if(prices.length){
+    document.getElementById('hkAvg').textContent=fmtINR(prices.reduce((a,b)=>a+b,0)/prices.length);
+    document.getElementById('hkTop').textContent=fmtINR(Math.max(...prices));
+  }
+  const brands=new Set(rows.map(r=>r.brand).filter(Boolean));
+  document.getElementById('hkBrands').textContent=brands.size||'—';
+}
+
+let trendChartInst=null;
+function buildTrend(rows){
+  const tc=document.getElementById('trendCard');
+  if(rows.length<2){if(tc)tc.style.display='none';return;}
+  if(tc)tc.style.display='block';
+  const last20=rows.slice(0,20).reverse();
+  if(trendChartInst){trendChartInst.destroy();trendChartInst=null;}
+  const ctx=document.getElementById('trendChart');
+  if(!ctx)return;
+  trendChartInst=new Chart(ctx,{type:'line',data:{labels:last20.map(r=>r.brand||'?'),datasets:[{data:last20.map(r=>+(r.predicted_price||0)),borderColor:'#f59e0b',backgroundColor:'rgba(245,158,11,.07)',fill:true,tension:.4,pointRadius:4,pointBackgroundColor:'#f59e0b',pointBorderColor:'#05080f',pointBorderWidth:2}]},options:{plugins:{legend:{display:false}},scales:{x:{ticks:{maxRotation:30,font:{size:10}}},y:{ticks:{callback:v=>fmtINR(v)}}}}});
+}
+
+function renderHistTable(rows){
+  const count=document.getElementById('htCount');
+  const body=document.getElementById('histBody');
+  const empty=document.getElementById('emptyState');
+  if(count)count.textContent=`${rows.length} record${rows.length!==1?'s':''}`;
+  if(!rows.length){if(body)body.innerHTML='';if(empty)empty.style.display='block';return;}
+  if(empty)empty.style.display='none';
+  body.innerHTML=rows.map((r,i)=>`<tr><td class="td-mono">${i+1}</td><td>${r.ts||'—'}</td><td class="td-bold">${r.brand||'—'}</td><td>${r.model_name||'—'}</td><td class="td-mono">${r.year||'—'}</td><td><span class="fuel-chip">${r.fuel_type||'—'}</span></td><td>${r.transmission||'—'}</td><td>${r.owner||'—'}</td><td class="td-mono">${r.km_driven?(+r.km_driven).toLocaleString('en-IN'):'—'}</td><td class="td-mono">${r.engine_cc?r.engine_cc+' cc':'—'}</td><td class="td-mono">${r.max_power_hp?r.max_power_hp+' HP':'—'}</td><td class="td-mono">${r.mileage_kmpl?(+r.mileage_kmpl).toFixed(1)+' km/l':'—'}</td><td class="td-price">${r.predicted_price?fmtINR(r.predicted_price):'—'}</td><td class="td-mono" style="font-size:.78rem;color:var(--text3)">${r.confidence_low?fmtINR(r.confidence_low)+'–'+fmtINR(r.confidence_high):'—'}</td></tr>`).join('');
+}
+
+function filterHistory(){
+  const q=(document.getElementById('searchInput').value||'').toLowerCase();
+  if(!q){renderHistTable(allRows);return;}
+  renderHistTable(allRows.filter(r=>(r.brand||'').toLowerCase().includes(q)||(r.model_name||'').toLowerCase().includes(q)||(r.fuel_type||'').toLowerCase().includes(q)||String(r.year||'').includes(q)));
+}
+
+function clearHistory(){
+  if(!confirm('Delete all prediction history?'))return;
+  clearPreds();allRows=[];renderHistory();showToast('History cleared ✓','success');
+}
+
+function exportHistory(){
+  if(!allRows.length){showToast('Nothing to export','error');return;}
+  const cols=Object.keys(allRows[0]);
+  const csv=[cols.join(','),...allRows.map(r=>cols.map(c=>`"${r[c]||''}"`).join(','))].join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='history_'+Date.now()+'.csv';document.body.appendChild(a);a.click();document.body.removeChild(a);
+  showToast('📥 Exported!','success');
+}
+
+/* Init */
+document.addEventListener('DOMContentLoaded',()=>{
+  const p=getPreds();
+  const el=document.getElementById('homePreds');
+  if(el)el.textContent=p.length;
+  // Check backend silently
+  fetch('http://localhost:5000/api/health',{signal:AbortSignal.timeout(2000)}).then(r=>r.json()).then(()=>{
+    const d=document.getElementById('nsDot'),t=document.getElementById('nsText');
+    if(d)d.className='ns-dot online';if(t)t.textContent='Live';
+  }).catch(()=>{
+    const d=document.getElementById('nsDot'),t=document.getElementById('nsText');
+    if(d)d.className='ns-dot offline';if(t)t.textContent='Offline';
+  });
+});
+
+/* ══════════════════════════════════════
+   PIN LOCK FOR HISTORY
+══════════════════════════════════════ */
+let pinBuffer='', pinUnlocked=false;
+const DEFAULT_PIN='2580';
+
+function getPIN(){return localStorage.getItem('cva_pin')||DEFAULT_PIN;}
+
+function checkPinBeforeHistory(){
+  if(pinUnlocked){renderHistory();return;}
+  document.getElementById('pinOverlay').style.display='flex';
+  pinBuffer=''; updatePinDots();
+}
+
+function pinPress(digit){
+  if(!digit)return;
+  if(pinBuffer.length>=4)return;
+  pinBuffer+=digit;
+  updatePinDots();
+  if(pinBuffer.length===4) setTimeout(checkPin,200);
+}
+
+function pinDel(){
+  pinBuffer=pinBuffer.slice(0,-1);
+  updatePinDots();
+  document.getElementById('pinError').textContent='';
+}
+
+function updatePinDots(){
+  for(let i=0;i<4;i++){
+    const d=document.getElementById('pd'+i);
+    if(d){d.className='pin-dot'+(i<pinBuffer.length?' filled':'');}
+  }
+}
+
+function checkPin(){
+  if(pinBuffer===getPIN()){
+    pinUnlocked=true;
+    document.getElementById('pinOverlay').style.display='none';
+    renderHistory();
+  } else {
+    for(let i=0;i<4;i++){const d=document.getElementById('pd'+i);if(d)d.className='pin-dot error';}
+    document.getElementById('pinError').textContent='Galat PIN! Phir try karein.';
+    setTimeout(()=>{pinBuffer='';updatePinDots();document.getElementById('pinError').textContent='';},900);
+  }
+}
+
+// Lock history when switching away
+const _origShowTab=showTab;
+
+/* ══════════════════════════════════════
+   PRICE BREAKDOWN ANALYSIS
+══════════════════════════════════════ */
+function buildPriceBreakdown(payload, predictedPrice){
+  const base = window.BASE_P[payload.brand]||600000;
+  const age = 2024-(+payload.year);
+  const dep = Math.max(.2,1-age*.07);
+  const kmf = Math.max(.3,1-(+payload.km_driven)/500000);
+  const ff = {Petrol:1,Diesel:1.1,CNG:.9,Electric:1.3,Hybrid:1.2}[payload.fuel_type]||1;
+  const tf = {Manual:1,Automatic:1.15,CVT:1.12,DCT:1.18}[payload.transmission]||1;
+  const of = {'First Owner':1,'Second Owner':.85,'Third Owner':.7,'Fourth & Above Owner':.55}[payload.owner]||1;
+  
+  const factors=[
+    {label:'Base Brand Value', value:base, pct:100, color:'#3b82f6'},
+    {label:`Age Depreciation (${age} yrs)`, value:Math.round(base*dep), pct:Math.round(dep*100), color:'#f59e0b'},
+    {label:`KM Factor (${(+payload.km_driven).toLocaleString('en-IN')} km)`, value:Math.round(base*dep*kmf), pct:Math.round(kmf*100), color:'#10b981'},
+    {label:`Fuel: ${payload.fuel_type}`, value:Math.round(base*dep*kmf*ff), pct:Math.round(ff*100), color:'#8b5cf6'},
+    {label:`${payload.transmission} Transmission`, value:Math.round(base*dep*kmf*ff*tf), pct:Math.round(tf*100), color:'#06b6d4'},
+    {label:`${payload.owner}`, value:predictedPrice, pct:Math.round(of*100), color:of>=1?'#10b981':of>=.8?'#f59e0b':'#ef4444'},
+  ];
+  
+  const el=document.getElementById('pb2Items');
+  if(!el)return;
+  el.innerHTML=factors.map(f=>`
+    <div class="pb2-item">
+      <div style="flex:1">
+        <div class="pb2-label">${f.label}</div>
+        <div class="pb2-bar-wrap"><div class="pb2-bar" style="width:${Math.min(f.pct,100)}%;background:${f.color}"></div></div>
+      </div>
+      <div class="pb2-val" style="margin-left:.8rem">${fmtINR(f.value)}</div>
+    </div>`).join('');
+}
+
+/* ══════════════════════════════════════
+   REPORT DOWNLOAD
+══════════════════════════════════════ */
+function downloadReport(format){
+  if(!lastPred){showToast('Pehle prediction karein!','error');return;}
+  const p=lastPred;
+  if(format==='csv'){
+    const cols=Object.keys(p);
+    const csv=cols.join(',')+'\n'+cols.map(c=>`"${p[c]||''}"`).join(',');
+    triggerDL(csv,'text/csv','car_report_'+Date.now()+'.csv');
+    showToast('📊 CSV downloaded!','success');
+  } else if(format==='json'){
+    triggerDL(JSON.stringify(p,null,2),'application/json','car_report_'+Date.now()+'.json');
+    showToast('🗄️ JSON downloaded!','success');
+  } else if(format==='pdf'){
+    const w=window.open('','_blank');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>CarValueAI Report</title>
+    <style>body{font-family:Arial,sans-serif;background:#05080f;color:#f0f4ff;padding:2rem;margin:0;}
+    h1{color:#f59e0b;font-size:2rem;margin-bottom:.5rem;}
+    .sub{color:#8b9ab5;margin-bottom:2rem;}
+    table{width:100%;border-collapse:collapse;}
+    th{text-align:left;padding:.6rem 1rem;background:#0f1623;color:#8b9ab5;font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;}
+    td{padding:.7rem 1rem;border-bottom:1px solid rgba(255,255,255,.06);color:#f0f4ff;}
+    .price{font-size:2.5rem;color:#f59e0b;font-weight:bold;margin:1.5rem 0;}
+    .footer{margin-top:2rem;color:#3d4f6b;font-size:.8rem;}
+    @media print{body{background:#fff;color:#000;}h1,td{color:#000;}.price{color:#d97706;}}</style>
+    </head><body>
+    <h1>🚗 CarValueAI Report</h1>
+    <div class="sub">Generated: ${new Date().toLocaleString('en-IN')}</div>
+    <div class="price">${fmtINR(p.predicted_price)}</div>
+    <table>
+    <tr><th>Parameter</th><th>Value</th></tr>
+    ${[['Brand',p.brand],['Model',p.model_name],['Year',p.year],['Fuel Type',p.fuel_type],['Transmission',p.transmission],['Owner',p.owner],['KM Driven',(+(p.km_driven||0)).toLocaleString('en-IN')+' km'],['Engine',p.engine_cc+' cc'],['Max Power',p.max_power_hp+' HP'],['Mileage',(+(p.mileage_kmpl||0)).toFixed(1)+' km/l'],['Seats',p.seats],['Seller Type',p.seller_type],['Confidence Low',fmtINR(p.confidence_low)],['Predicted Price',fmtINR(p.predicted_price)],['Confidence High',fmtINR(p.confidence_high)],['Algorithm',p.model_used||'Local']].map(([l,v])=>`<tr><td>${l}</td><td>${v}</td></tr>`).join('')}
+    </table>
+    <div class="footer">CarValueAI — Sirf ek estimate hai, actual market price vary kar sakti hai.</div>
+    </body></html>`);
+    w.document.close();
+    setTimeout(()=>w.print(),400);
+    showToast('📋 PDF print dialog khul raha hai...','success');
+  }
+}
+
+function triggerDL(content,mime,filename){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:mime}));
+  a.download=filename;document.body.appendChild(a);a.click();document.body.removeChild(a);
+}
+
+</script>
+
+<!-- PIN LOCK OVERLAY -->
+<div class="pin-overlay" id="pinOverlay" style="display:none">
+  <div class="pin-card">
+    <div class="pin-icon">🔐</div>
+    <div class="pin-title">PRIVATE HISTORY</div>
+    <div class="pin-desc">Yeh section sirf aapke liye hai. Default PIN: <strong>2580</strong><br>Aap ise baad mein badal sakte hain.</div>
+    <div class="pin-dots" id="pinDots">
+      <div class="pin-dot" id="pd0"></div>
+      <div class="pin-dot" id="pd1"></div>
+      <div class="pin-dot" id="pd2"></div>
+      <div class="pin-dot" id="pd3"></div>
+    </div>
+    <div class="pin-pad">
+      <button class="pin-key" onclick="pinPress('1')">1</button>
+      <button class="pin-key" onclick="pinPress('2')">2</button>
+      <button class="pin-key" onclick="pinPress('3')">3</button>
+      <button class="pin-key" onclick="pinPress('4')">4</button>
+      <button class="pin-key" onclick="pinPress('5')">5</button>
+      <button class="pin-key" onclick="pinPress('6')">6</button>
+      <button class="pin-key" onclick="pinPress('7')">7</button>
+      <button class="pin-key" onclick="pinPress('8')">8</button>
+      <button class="pin-key" onclick="pinPress('9')">9</button>
+      <button class="pin-key" onclick="pinPress('')" style="opacity:.2;cursor:default"></button>
+      <button class="pin-key" onclick="pinPress('0')">0</button>
+      <button class="pin-key del" onclick="pinDel()">⌫</button>
+    </div>
+    <div class="pin-hint">PIN bhool gaye? Default: 2580</div>
+    <div class="pin-error-msg" id="pinError"></div>
+  </div>
+</div>
+
+</body>
+</html>
